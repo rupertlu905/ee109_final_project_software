@@ -17,6 +17,8 @@ from torch import nn, Tensor
 import IPython
 e = IPython.embed
 
+from torch.profiler import record_function
+
 class Transformer(nn.Module):
 
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
@@ -70,9 +72,11 @@ class Transformer(nn.Module):
             query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
-        hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
-                          pos=pos_embed, query_pos=query_embed)
+        with record_function("transformer_encoder"):
+            memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        with record_function("transformer_decoder"):
+            hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
+                        pos=pos_embed, query_pos=query_embed)
         hs = hs.transpose(1, 2)
         return hs
 
@@ -169,8 +173,10 @@ class TransformerEncoderLayer(nn.Module):
                      src_key_padding_mask: Optional[Tensor] = None,
                      pos: Optional[Tensor] = None):
         q = k = self.with_pos_embed(src, pos)
-        src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
-                              key_padding_mask=src_key_padding_mask)[0]
+        with record_function("transformer_encoder_attention"):
+            # src2 = self.self_attn(q, k, src, attn_mask=src_mask,
+            #                   key_padding_mask=src_key_padding_mask)[0]
+            src2 = self.self_attn(q, k, src, src_key_padding_mask, True, src_mask)[0]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
@@ -184,8 +190,10 @@ class TransformerEncoderLayer(nn.Module):
                     pos: Optional[Tensor] = None):
         src2 = self.norm1(src)
         q = k = self.with_pos_embed(src2, pos)
-        src2 = self.self_attn(q, k, value=src2, attn_mask=src_mask,
-                              key_padding_mask=src_key_padding_mask)[0]
+        with record_function("transformer_encoder_attention"):
+            # src2 = self.self_attn(q, k, src2, attn_mask=src_mask,
+            #                   key_padding_mask=src_key_padding_mask)[0]
+            src2 = self.self_attn(q, k, src2, src_key_padding_mask, True, src_mask)[0]
         src = src + self.dropout1(src2)
         src2 = self.norm2(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
@@ -234,14 +242,20 @@ class TransformerDecoderLayer(nn.Module):
                      pos: Optional[Tensor] = None,
                      query_pos: Optional[Tensor] = None):
         q = k = self.with_pos_embed(tgt, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+        with record_function("transformer_decoder_attention1"):
+            # tgt2 = self.self_attn(q, k, tgt, attn_mask=tgt_mask,
+                            #   key_padding_mask=tgt_key_padding_mask)[0]
+            tgt2 = self.self_attn(q, k, tgt, tgt_key_padding_mask, True, tgt_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
-                                   key=self.with_pos_embed(memory, pos),
-                                   value=memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+        with record_function("transformer_decoder_attention2"):
+            # tgt2 = self.multihead_attn(self.with_pos_embed(tgt, query_pos),
+            #                        self.with_pos_embed(memory, pos),
+            #                        memory, attn_mask=memory_mask,
+            #                        key_padding_mask=memory_key_padding_mask)[0]
+            tgt2 = self.multihead_attn(self.with_pos_embed(tgt, query_pos),
+                                   self.with_pos_embed(memory, pos),
+                                   memory, memory_key_padding_mask, True, memory_mask)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
@@ -258,14 +272,20 @@ class TransformerDecoderLayer(nn.Module):
                     query_pos: Optional[Tensor] = None):
         tgt2 = self.norm1(tgt)
         q = k = self.with_pos_embed(tgt2, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+        with record_function("transformer_decoder_attention1"):
+            # tgt2 = self.self_attn(q, k, tgt2, attn_mask=tgt_mask,
+            #                   key_padding_mask=tgt_key_padding_mask)[0]
+            tgt2 = self.self_attn(q, k, tgt2, tgt_key_padding_mask, True, tgt_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt2 = self.norm2(tgt)
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
-                                   key=self.with_pos_embed(memory, pos),
-                                   value=memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+        with record_function("transformer_decoder_attention2"):
+            # tgt2 = self.multihead_attn(self.with_pos_embed(tgt2, query_pos),
+            #                        self.with_pos_embed(memory, pos),
+            #                        memory, attn_mask=memory_mask,
+            #                        key_padding_mask=memory_key_padding_mask)[0]
+            tgt2 = self.multihead_attn(self.with_pos_embed(tgt2, query_pos),
+                                   self.with_pos_embed(memory, pos),
+                                   memory, memory_key_padding_mask, True, memory_mask)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt2 = self.norm3(tgt)
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))

@@ -18,6 +18,8 @@ from .position_encoding import build_position_encoding
 import IPython
 e = IPython.embed
 
+from torch.profiler import record_function
+
 class FrozenBatchNorm2d(torch.nn.Module):
     """
     BatchNorm2d where the batch statistics and the affine parameters are fixed.
@@ -101,13 +103,15 @@ class Joiner(nn.Sequential):
         super().__init__(backbone, position_embedding)
 
     def forward(self, tensor_list: NestedTensor):
-        xs = self[0](tensor_list)
+        with record_function("resnet"):
+            xs = self[0](tensor_list)
         out: List[NestedTensor] = []
         pos = []
         for name, x in xs.items():
             out.append(x)
             # position encoding
-            pos.append(self[1](x).to(x.dtype))
+            with record_function("position_embedding"):
+                pos.append(self[1](x).to(x.dtype))
 
         return out, pos
 

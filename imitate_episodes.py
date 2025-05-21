@@ -13,13 +13,15 @@ from constants import PUPPET_GRIPPER_JOINT_OPEN
 from utils import load_data # data functions
 from utils import sample_box_pose, sample_insertion_pose # robot functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
-from policy import ACTPolicy, CNNMLPPolicy
+from policy import ACTPolicy, CNNMLPPolicy, hook_fn
 from visualize_episodes import save_videos
 
 from sim_env import BOX_POSE
 
 import IPython
 e = IPython.embed
+
+from torch.profiler import profile, record_function, ProfilerActivity
 
 def main(args):
     set_seed(1)
@@ -174,6 +176,11 @@ def eval_bc(config, ckpt_name, save_episode=True):
     with open(stats_path, 'rb') as f:
         stats = pickle.load(f)
 
+    # Register hooks to dump tensors
+    for name, module in policy.named_modules():
+        if isinstance(module, torch.nn.MultiheadAttention):
+            module.register_forward_hook(hook_fn(name))
+
     pre_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
     post_process = lambda a: a * stats['action_std'] + stats['action_mean']
 
@@ -246,7 +253,10 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 ### query policy
                 if config['policy_class'] == "ACT":
                     if t % query_frequency == 0:
-                        all_actions = policy(qpos, curr_image)
+                        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_stack=True) as prof:
+                            with record_function("model_inference"):
+                                all_actions = policy(qpos, curr_image)
+                        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=11))
                     if temporal_agg:
                         all_time_actions[[t], t:t+num_queries] = all_actions
                         actions_for_curr_step = all_time_actions[:, t]

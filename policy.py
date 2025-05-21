@@ -1,3 +1,6 @@
+import csv
+import os
+import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
@@ -5,6 +8,119 @@ import torchvision.transforms as transforms
 from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
 import IPython
 e = IPython.embed
+
+def dump_tensor_to_csv(tensor, filepath):
+    """Dump a tensor to a CSV file."""
+    # Convert tensor to numpy, flattening if needed.
+    array = tensor.detach().cpu().numpy()
+    if not os.path.exists(os.path.dirname(filepath)):
+        os.makedirs(os.path.dirname(filepath))
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if array.ndim == 1:
+            for val in array:
+                writer.writerow([val])
+        else:
+            for row in array:
+                writer.writerow(row)
+
+def manual_multihead_attention(q, k, v, module, attn_mask=None, key_padding_mask=None):
+    """
+    Manually compute multihead attention using module parameters.
+    q,k,v: tensors of shape (L, N, E) as passed in (or extracted from tuple if needed).
+    module: the nn.MultiheadAttention instance from which we extract parameters.
+    Returns the attention output computed manually.
+    """
+    # Retrieve parameters
+    embed_dim = module.embed_dim        # total embedding dimension, E
+    nhead = module.num_heads            # number of heads
+    head_dim = embed_dim // nhead
+    scaling = head_dim ** -0.5
+
+    # Assumes in_proj_weight is concatenation of q, k, v projection weights.
+    # Split them into three pieces.
+    weight = module.in_proj_weight      # shape (3*E, E)
+    bias = module.in_proj_bias          # shape (3*E,) if not None
+
+    weight_q = weight[:embed_dim, :]
+    weight_k = weight[embed_dim:2*embed_dim, :]
+    weight_v = weight[2*embed_dim:, :]
+    bias_q = bias[:embed_dim] if bias is not None else None
+    bias_k = bias[embed_dim:2*embed_dim] if bias is not None else None
+    bias_v = bias[2*embed_dim:] if bias is not None else None
+
+    # Linear projections for q, k, v
+    q_proj = F.linear(q, weight_q, bias_q) * scaling
+    k_proj = F.linear(k, weight_k, bias_k)
+    v_proj = F.linear(v, weight_v, bias_v)
+
+    # Reshape to separate heads.
+    # q_proj: (L, N, embed_dim) -> (N*nhead, L, head_dim)
+    def reshape_proj(x):
+        L, N, _ = x.size()
+        x = x.contiguous().view(L, N, nhead, head_dim)
+        x = x.permute(1, 2, 0, 3)  # (N, nhead, L, head_dim)
+        return x.reshape(N * nhead, L, head_dim)
+
+    q_proj = reshape_proj(q_proj)
+    k_proj = reshape_proj(k_proj)
+    v_proj = reshape_proj(v_proj)
+
+    # Compute scaled dot-product attention scores.
+    # attn_scores: (N*nhead, L, L)
+    attn_scores = torch.bmm(q_proj, k_proj.transpose(1, 2))
+    if attn_mask is not None:
+        attn_scores = attn_scores + attn_mask
+    # Note: key_padding_mask is not processed here explicitly.
+
+    attn_weights = F.softmax(attn_scores, dim=-1)
+    # Optionally: apply dropout (if module.dropout > 0)
+    if module.dropout > 0:
+        attn_weights = F.dropout(attn_weights, p=module.dropout, training=module.training)
+
+    # Compute attention output.
+    attn_output = torch.bmm(attn_weights, v_proj)  # (N*nhead, L, head_dim)
+
+    # Revert shape to (L, N, embed_dim)
+    def revert_shape(x):
+        Nn, L, hd = x.size()
+        N = Nn // nhead
+        x = x.view(N, nhead, L, hd)
+        x = x.permute(2, 0, 1, 3).contiguous()  # (L, N, nhead, head_dim)
+        return x.view(L, N, embed_dim)
+    attn_output = revert_shape(attn_output)
+
+    # Final projection using out_proj.
+    attn_output_manual = F.linear(attn_output, module.out_proj.weight, module.out_proj.bias)
+    return attn_output_manual
+
+def hook_fn(name):
+    def hook(module, inputs, output):
+        dump_dir = f"data_dump/{name}"
+
+        q, k, v = inputs[:3]
+        # print(f"Dumping q, k, v to {dump_dir}")
+        # print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
+        dump_tensor_to_csv(q, os.path.join(dump_dir, "q.csv"))
+        dump_tensor_to_csv(k, os.path.join(dump_dir, "k.csv"))
+        dump_tensor_to_csv(v, os.path.join(dump_dir, "v.csv"))
+
+        # print(f"Dumping output to {dump_dir}")
+        # print(f"output shape: {output[0].shape}")
+        dump_tensor_to_csv(output[0], os.path.join(dump_dir, "output.csv"))
+
+        # key_padding_mask = inputs[3]
+        # dump_tensor_to_csv(key_padding_mask, os.path.join(dump_dir, "key_padding_mask.csv"))
+        # attn_mask = inputs[5]
+        # dump_tensor_to_csv(attn_mask, os.path.join(dump_dir, "attn_mask.csv"))
+
+        with torch.no_grad():
+            manual_output = manual_multihead_attention(q, k, v, module)
+        
+        match = torch.allclose(output[0], manual_output)
+        print(f"Output match: {match}")
+        exit(0)
+    return hook
 
 class ACTPolicy(nn.Module):
     def __init__(self, args_override):
